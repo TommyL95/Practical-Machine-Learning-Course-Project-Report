@@ -1,0 +1,210 @@
+---
+title: "PWeight Lifting Exercise (WLE) Classification Report"
+author: "Thomas Lizzi"
+date: "2025-10-24"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+
+# Introduction
+
+This report builds a predictive model for the "Weight Lifting Exercise (WLE)" dataset.
+
+# Background
+
+Activity trackers (like Fitbit) collect large amounts of data. This project uses accelerometer data from 6 participants performing barbell lifts. The goal is to classify how well they performed the lift (correctly vs. incorrectly in 5 ways) based on this sensor data.
+
+# Data Sources
+
+Training Data: https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+
+Testing Data: https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+
+Original Source: http://groupware.les.inf.puc-rio.br/har
+
+# Intended Results
+
+The goal is to predict the classe variable, which describes the exercise quality. This report explains the model building process, including cross-validation and out-of-sample error estimation. The final model is used to predict 20 test cases.
+
+1. Reproducibility and Setup
+
+This section loads the required R libraries and sets a random seed for reproducible results.
+```{r setup, include=FALSE}
+# Uncomment the line below to install required packages if not already installed
+# install.packages(c("rattle", "caret", "rpart", "rpart.plot", "corrplot", "randomForest", "RColorBrewer"))
+
+library(rattle)
+library(caret)
+library(rpart)
+library(rpart.plot)
+library(corrplot)
+library(randomForest)
+library(RColorBrewer)
+
+# Set seed for reproducible results
+set.seed(56789)
+```
+
+2. Getting and Reading Data
+
+The code below downloads the training and testing datasets and loads them into R.
+```{r data-download}
+trainUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+testUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+trainFile <- "./data/pml-training.csv"
+testFile  <- "./data/pml-testing.csv"
+
+if (!file.exists("./data")) {
+  dir.create("./data")
+}
+if (!file.exists(trainFile)) {
+  download.file(trainUrl, destfile = trainFile, method = "curl")
+}
+if (!file.exists(testFile)) {
+  download.file(testUrl, destfile = testFile, method = "curl")
+}
+rm(trainUrl)
+rm(testUrl)
+
+
+trainRaw <- read.csv(trainFile)
+testRaw <- read.csv(testFile)
+print(paste("Training data dimensions:", dim(trainRaw)[1], "rows,", dim(trainRaw)[2], "cols"))
+print(paste("Testing data dimensions:", dim(testRaw)[1], "rows,", dim(testRaw)[2], "cols"))
+
+rm(trainFile)
+rm(testFile)
+```
+
+3. Cleaning Data
+
+The data is cleaned by removing unhelpful variables.
+
+3.1. Remove Near Zero Variance (NZV) Variables
+
+First, we remove columns with near-zero variance (i.e., columns that are mostly constant).
+```{r nzv-removal}
+NZV <- nearZeroVar(trainRaw, saveMetrics = TRUE)
+training01 <- trainRaw[, !NZV$nzv]
+testing01 <- testRaw[, !NZV$nzv]
+print(paste("Dimensions after NZV removal:", dim(training01)[1], "rows,", dim(training01)[2], "cols"))
+
+rm(trainRaw)
+rm(testRaw)
+rm(NZV)
+```
+
+3.2. Remove Metadata/Identifier Columns
+
+Next, we remove metadata columns (like user names, timestamps, and row IDs) that are not predictive sensor data.
+```{r metadata-removal}
+regex <- grepl("^X|timestamp|user_name", names(training01))
+training <- training01[, !regex]
+testing <- testing01[, !regex]
+rm(regex)
+rm(training01)
+rm(testing01)
+print(paste("Dimensions after metadata removal:", dim(training)[1], "rows,", dim(training)[2], "cols"))
+
+```
+3.3. Remove Columns with Missing Values (NAs)
+
+Finally, we remove all columns that contain any NA (missing) values.
+```{r na-removal}
+cond <- (colSums(is.na(training)) == 0)
+training <- training[, cond]
+testing <- testing[, cond]
+rm(cond)
+print(paste("Final training dimensions:", dim(training)[1], "rows,", dim(training)[2], "cols"))
+print(paste("Final testing dimensions:", dim(testing)[1], "rows,", dim(testing)[2], "cols"))
+```
+3.4. Convert Outcome Variable to Factor
+
+We must convert the classe variable from a character to a factor for the classification models. This ensures the levels are consistent for confusionMatrix().
+```{r factor-conversion}
+training$classe <- as.factor(training$classe)
+print("Converted 'classe' variable to factor.")
+```
+4. Correlation Matrix
+
+A correlation matrix is plotted to visualize relationships between the remaining predictors.
+```{r correlation-plot, fig.width=7, fig.height=7}
+corrplot(cor(training[, -length(names(training))]), method = "color", tl.cex = 0.5)
+```
+
+5. Partitioning Training Set
+
+The clean training data is split into a 70% training set (for building the model) and a 30% validation set (for testing it).
+```{r data-partition}
+inTrain <- createDataPartition(training$classe, p = 0.70, list = FALSE)
+validation <- training[-inTrain, ]
+training <- training[inTrain, ]
+rm(inTrain)
+
+print(paste("Pure Training Set:", nrow(training), "rows"))
+print(paste("Validation Set:", nrow(validation), "rows"))
+```
+
+6. Data Modelling
+
+We will train and compare two classification models.
+
+6.1. Model 1: Decision Tree (rpart)
+
+The first model is a simple Decision Tree.
+```{r decision-tree}
+modelTree <- rpart(classe ~ ., data = training, method = "class")
+prp(modelTree)
+
+# Estimate performance on the validation set
+predictTree <- predict(modelTree, validation, type = "class")
+cm_tree <- confusionMatrix(validation$classe, predictTree)
+print("--- Decision Tree Results ---")
+print(cm_tree)
+
+ose_tree <- 1 - as.numeric(cm_tree$overall[1])
+print(paste("Decision Tree OOS Error:", round(ose_tree, 4)))
+rm(predictTree)
+rm(modelTree)
+rm(cm_tree)
+```
+
+6.2. Model 2: Random Forest
+
+The second model is a Random Forest, which is typically more accurate. We use 5-fold cross-validation to tune it.
+```{r random-forest}
+# This step may take some time
+modelRF <- train(classe ~ ., 
+                 data = training, 
+                 method = "rf", 
+                 trControl = trainControl(method = "cv", 5), 
+                 ntree = 250)
+print(modelRF)
+
+# Estimate performance on the validation set
+predictRF <- predict(modelRF, validation)
+cm_rf <- confusionMatrix(validation$classe, predictRF)
+print("--- Random Forest Results ---")
+print(cm_rf)
+
+ose_rf <- 1 - as.numeric(cm_rf$overall[1])
+print(paste("Random Forest OOS Error:", round(ose_rf, 4)))
+rm(predictRF)
+rm(cm_rf)
+```
+
+The Random Forest model is significantly more accurate and has a much lower out-of-sample error. We will use this model for the final predictions.
+
+7. Final Predictions on Test Set
+
+The trained Random Forest model is used to predict the 20 cases in the official test set. The non-predictive problem_id column is removed from the test set before prediction.
+```{r final-predictions}
+# Note: The 'testing' set from cleaning still has 'problem_id'
+# We predict on the testing set, removing the last column ('problem_id')
+final_predictions <- predict(modelRF, testing[, -length(names(testing))])
+
+print("Final Predictions on 20 Test Cases:")
+print(final_predictions)
+```
