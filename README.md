@@ -1,1 +1,1 @@
-# actical-Machine-Learning-Course-Project-Report
+# Practical-Machine-Learning-Course-Project-Report
